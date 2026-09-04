@@ -66,3 +66,23 @@ flowchart LR
 - 在队列仍有数据时退出，检查是否完成最终刷盘。
 - 模拟目录不存在、磁盘满和权限不足。
 
+
+
+## 完整代码案例
+
+PDF 中的多版日志代码展示了从同步输出、宏封装、异步缓冲到文件滚动和分类日志的演进。由于原稿跨页后存在漏行和括号缺失，这里整理为一个完整的 C++17 示例：
+
+- [查看完整源码：examples/logging_system.cpp](examples/logging_system.cpp)
+- 支持 `TRACE` 到 `FATAL` 的级别过滤。
+- 宏自动记录文件名、行号和函数名。
+- 业务线程写入有界队列，后台线程批量刷盘。
+- 日志文件达到大小上限后自动滚动，并保留指定数量的备份。
+- 可以为 `network` 等分类单独设置最低日志级别。
+
+```bash
+g++ -std=c++17 -O2 -Wall -Wextra -pthread \
+  examples/logging_system.cpp -o logging_system
+./logging_system
+```
+
+运行后，控制台会显示日志，文件日志写入 `./log/app.log`；文件达到示例设置的 64 KiB 后会依次生成 `app.log.1`、`app.log.2` 和 `app.log.3`。
