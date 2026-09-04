@@ -102,3 +102,49 @@ LogicServer 到 DataServer 如果允许多个并发请求，不能用“发送�
 - 慢客户端：限制输出缓冲，超过阈值时断开或降级。
 - 服务停止：停止接收、关闭队列、处理剩余任务、回收线程和 fd。
 
+
+
+## DataServer 与 LogicServer 参考实现
+
+这两份 PDF 是类、字段、接口和线程流程的结构图，并不包含可以逐行复制的源代码。下面两个文件按照结构图中的职责与命令格式还原为可运行的 C++17 学习实现：
+
+- [DataServer 源码：examples/chat_dataserver.cpp](examples/chat_dataserver.cpp)
+- [LogicServer 源码：examples/chat_logicserver.cpp](examples/chat_logicserver.cpp)
+
+DataServer 维护 `ChannelManager -> SingleChannel -> Message` 数据结构，支持：
+
+- `get_channel:<channel_id>`：拉取频道历史消息。
+- `send_message:<channel_id>:<sender_id>:<content>`：保存消息。
+
+LogicServer 保存在线客户端与当前频道，向客户端提供：
+
+- `login:<client_id>`
+- `join_channel:<channel_id>`
+- `send_message:<content>`
+- `quit`
+
+结构图原方案是 `epoll + 任务队列 + 工作线程`。这份代码为了突出 LogicServer/DataServer 的职责划分，网络接入层使用 `accept + 工作线程池`；完整 epoll 事件循环可参考 05 章的聊天室服务端。
+
+```bash
+g++ -std=c++17 -O2 -Wall -Wextra -pthread examples/chat_dataserver.cpp -o chat_dataserver
+g++ -std=c++17 -O2 -Wall -Wextra -pthread examples/chat_logicserver.cpp -o chat_logicserver
+```
+
+按 DataServer、LogicServer、客户端的顺序启动：
+
+```bash
+./chat_dataserver 9001
+./chat_logicserver 9000 127.0.0.1 9001
+nc 127.0.0.1 9000
+```
+
+连接后可以依次输入：
+
+```text
+login:alice
+join_channel:room1
+send_message:hello
+quit
+```
+
+当前 DataServer 使用内存保存最近 100 条频道消息，重启后数据会清空；它适合解释原图中的接口协作，不应当被误认为具备持久化、鉴权、限流和生产级故障恢复。
