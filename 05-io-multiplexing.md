@@ -66,3 +66,28 @@ select 返回后，程序通常仍要遍历 fd 集合判断哪些连接就绪。
 - 慢客户端需要独立发送缓冲和容量上限，不能阻塞整个事件循环。
 - 单事件循环中直接维护客户端表通常不需要锁；一旦加入工作线程，就要重新设计状态所有权。
 
+
+
+## 完整 epoll 聊天室代码
+
+原 PDF 包含 `server_mt.c` 和 `client_mt.c`，但分页导致部分 `bind`、`accept`、事件注册和清理代码缺失。下面的独立源文件保留聊天室、昵称、最近消息与退出功能，并补全了非阻塞 socket、按行拆包和断开清理：
+
+- [服务端源码：examples/epoll_chat_server.c](examples/epoll_chat_server.c)
+- [客户端源码：examples/epoll_chat_client.c](examples/epoll_chat_client.c)
+
+服务端使用 level-triggered `epoll`；监听 socket 和客户端 socket 均设置为非阻塞。每次事件到达后持续读取到 `EAGAIN`，并为每个客户端保存未完成的一行，从而正确处理 TCP 粘包和半包。
+
+```bash
+gcc -std=c11 -O2 -Wall -Wextra examples/epoll_chat_server.c -o epoll_chat_server
+gcc -std=c11 -O2 -Wall -Wextra -pthread examples/epoll_chat_client.c -o epoll_chat_client
+```
+
+启动服务端和两个客户端：
+
+```bash
+./epoll_chat_server 8888
+./epoll_chat_client 127.0.0.1 8888
+./epoll_chat_client 127.0.0.1 8888
+```
+
+客户端连接后先输入昵称，再输入聊天内容；输入 `/quit` 退出。新客户端会收到最近 10 条历史消息。
