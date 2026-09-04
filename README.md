@@ -1,93 +1,112 @@
 # Linux C/C++ 后端学习笔记
 
-> 从线程同步到事件驱动网络编程的一条渐进式学习路线，并配套可阅读、可编译的代码案例。
+> 从线程同步到事件驱动网络编程的一条渐进式学习路线。笔记不仅列出概念，还补充 API 用法、数据结构、线程框架、正常/异常流程图和可阅读的代码案例。
 
 ## Portfolio Summary
 
-This repository documents my progression through Linux backend fundamentals: POSIX threads, synchronization, producer–consumer queues, logging, TCP, I/O multiplexing, and a layered chat-server case study. It emphasizes not only API usage, but also concurrency invariants, protocol boundaries, failure handling, and the reasoning behind each design choice.
+This repository documents my progression through Linux backend fundamentals: POSIX threads, synchronization, producer–consumer queues, asynchronous logging, TCP, I/O multiplexing, and a layered chat-server case study. The expanded notes emphasize how APIs are used, who owns shared state, how threads start and stop, and how failure paths are designed before business logic is implemented.
 
-## 作品集亮点
+## 我的核心编程方法
 
-- **知识链条完整**：从线程与锁出发，逐步过渡到任务队列、日志组件、TCP 粘包处理、`select`/`epoll` 和多服务聊天系统。
-- **理论与代码对应**：关键章节配有独立案例，便于在 Linux 环境中复现、调试和继续扩展。
-- **强调工程边界**：笔记不仅记录“怎么写”，也讨论竞态、死锁、半包、断线、背压和资源回收等问题。
-- **形成项目闭环**：最终案例将网络层、逻辑层、数据层和 Redis 串联起来，并与独立项目仓库相互印证。
-
-## 学习路线
-
-| 阶段 | 内容 | 主要产出 |
-| --- | --- | --- |
-| 1 | [整体学习路线](01-learning-roadmap.md) | 建立 Linux 后端知识地图与阶段目标 |
-| 2 | [线程与同步](02-threads-and-synchronization.md) | 理解线程生命周期、互斥锁、条件变量与同步边界 |
-| 3 | [并发实践](03-concurrency-practices.md) | 银行账户与生产者—消费者模型，练习共享状态保护 |
-| 4 | [日志系统](04-logging-system.md) | 将并发队列、格式化输出和文件写入组合成基础组件 |
-| 5 | [I/O 多路复用](05-io-multiplexing.md) | 对比阻塞 I/O、`select` 与 `epoll` 的事件处理方式 |
-| 6 | [TCP 编程](06-tcp-programming.md) | 梳理连接建立、字节流协议、粘包/半包和异常关闭 |
-| 7 | [游戏聊天服务器](07-game-chat-server.md) | 分层设计 LogicServer、DataServer、Redis 与客户端 |
-| 8 | [复盘与下一步](08-review-and-next-steps.md) | 汇总能力边界、问题清单和后续学习计划 |
-
-## 知识之间的关系
+这段学习让我形成了一个稳定顺序：**先写数据结构 → 列出全局状态及所有权 → 设计线程/事件循环框架 → 画启动与退出流程 → 写函数骨架 → 填业务逻辑 → 验证异常与并发路径**。
 
 ```mermaid
 flowchart LR
-    A[线程与同步] --> B[并发任务队列]
-    B --> C[异步日志]
-    A --> D[TCP 连接处理]
-    D --> E[select / epoll]
-    B --> F[工作线程池]
-    E --> G[事件驱动服务器]
-    F --> G
-    C --> G
-    G --> H[分层聊天服务器]
-    H --> I[Redis 数据与历史消息]
+    A[需求与边界] --> B[数据结构与不变量]
+    B --> C[全局状态与所有权]
+    C --> D[线程 / 事件框架]
+    D --> E[启动、运行、退出流程]
+    E --> F[函数骨架]
+    F --> G[业务实现]
+    G --> H[并发、断线、超时验证]
 ```
+
+完整方法、线程表和编码前检查清单见 [01 学习路线与程序设计方法](01-learning-roadmap.md)。
+
+## 章节与关键字索引
+
+| 章节 | 重点关键字/API | 学会如何使用 |
+| --- | --- | --- |
+| [01 学习路线与程序设计方法](01-learning-roadmap.md) | 数据结构、全局状态、线程表、不变量、生命周期 | 在写业务代码前搭出完整程序骨架 |
+| [02 线程与同步](02-threads-and-synchronization.md) | `pthread_create`、`join`、mutex、rwlock、cond、semaphore | 创建/回收线程，选择同步工具，避免死锁与参数失效 |
+| [03 并发实践](03-concurrency-practices.md) | 银行账户、`pthread_cond_wait`、BlockingQueue、`TryPush/TryPop` | 写余额等待、有界队列、超时和关闭流程 |
+| [04 日志系统](04-logging-system.md) | level、宏、`__FILE__`、双缓冲、滚动、背压 | 从同步日志逐步设计异步线程安全组件 |
+| [05 I/O 多路复用](05-io-multiplexing.md) | `fd_set`、`select`、`epoll_create1`、`epoll_ctl`、`epoll_wait` | 管理多连接，理解 LT/ET、输出队列和 `EAGAIN` |
+| [06 TCP 编程](06-tcp-programming.md) | `socket`、`bind`、`listen`、`accept`、`connect`、`recv/send` | 建立服务端/客户端，处理半包、部分发送与关闭 |
+| [07 游戏聊天服务器](07-game-chat-server.md) | Client/Logic/Data、任务队列、心跳、ACK、重连 | 设计三层服务和“存盘成功后广播”的完整流程 |
+| [08 复盘与下一步](08-review-and-next-steps.md) | 设计表、调试、Sanitizer、完成标准 | 把学习方法固化为可复用的工程检查清单 |
+
+## 知识关系
+
+```mermaid
+flowchart LR
+    A[pthread 生命周期] --> B[mutex / rwlock]
+    B --> C[condition variable / semaphore]
+    C --> D[BlockingQueue]
+    D --> E[生产者—消费者]
+    E --> F[异步日志 / 工作线程池]
+    G[TCP Socket] --> H[消息边界与连接生命周期]
+    H --> I[select / epoll]
+    I --> J[事件驱动服务器]
+    F --> J
+    J --> K[Client / Logic / Data 聊天系统]
+    K --> L[Redis / ZooKeeper 后续实践]
+```
+
+## PDF 内容在笔记中的对应位置
+
+| 原始学习资料 | 扩写后的内容 |
+| --- | --- |
+| 线程 | pthread 创建、参数生命周期、锁、读写锁、条件变量、信号量、死锁 |
+| 多线程银行账户系统 | 数据结构、3 存款/2 取款线程、余额不足等待、完整流程图 |
+| 生产者消费者模型 | 容量 20 的阻塞队列、not_full/not_empty、超时 Push/Pop、统计线程 |
+| 日志 | 六阶段功能、异步队列、双缓冲、分类、文件滚动和满缓冲策略 |
+| TCP 服务端 | Socket API、监听/通信 fd、双向收发线程、shutdown 与 close |
+| I/O 多路复用 | 阻塞/轮询/select/epoll 对比、聊天室事件循环和 LT/ET |
+| TCP 游戏聊天服务器整体设计 | Client 心跳、Logic 工作队列、Data 写盘队列、20 条缓存和 ACK 后广播 |
 
 ## 代码案例
 
 | 案例 | 对应主题 | 重点观察 |
 | --- | --- | --- |
-| [`bank_account.c`](examples/bank_account.c) | 互斥与共享账户 | 临界区、余额不变量、线程安全 |
-| [`producer_consumer.cpp`](examples/producer_consumer.cpp) | 生产者—消费者 | 有界队列、条件变量、退出条件 |
+| [`bank_account.c`](examples/bank_account.c) | 互斥与条件变量 | 临界区、余额不变量、等待与唤醒 |
+| [`producer_consumer.cpp`](examples/producer_consumer.cpp) | 生产者—消费者 | 有界队列、非空/非满条件、退出 |
 | [`logging_system.cpp`](examples/logging_system.cpp) | 日志组件 | 多线程写入、消息队列、文件落盘 |
 | [`epoll_chat_server.c`](examples/epoll_chat_server.c) | I/O 多路复用 | 事件循环、连接管理、广播 |
-| [`epoll_chat_client.c`](examples/epoll_chat_client.c) | TCP 客户端 | 标准输入与网络事件协作 |
-| [`chat_logicserver.cpp`](examples/chat_logicserver.cpp) | 聊天逻辑层 | 会话、频道与消息转发 |
-| [`chat_dataserver.cpp`](examples/chat_dataserver.cpp) | 聊天数据层 | Redis 历史消息与数据接口 |
+| [`epoll_chat_client.c`](examples/epoll_chat_client.c) | TCP 客户端 | 标准输入和网络事件协作 |
+| [`chat_logicserver.cpp`](examples/chat_logicserver.cpp) | 聊天逻辑层 | 会话、频道、任务队列和转发 |
+| [`chat_dataserver.cpp`](examples/chat_dataserver.cpp) | 聊天数据层 | 历史消息与数据接口 |
 
-> 这些案例用于学习与结构分析。仓库给出了 Linux 下的复现方向，但当前版本没有声明全部案例已通过统一 CI；编译器版本和依赖差异仍需在目标环境中验证。
+> 示例主要用于学习和结构分析。仓库没有声明全部代码已经通过统一 CI；请在 Linux 目标环境中按章节说明编译，并结合 Sanitizer 和压力场景继续验证。
 
-## 我从这条路线中建立的能力
+## 建议阅读和实践方式
 
-| 能力 | 在仓库中的体现 |
+1. 先读 01 章，拿一张纸列出数据结构、全局状态和线程表；
+2. 阅读 02～06 章时，把每个 API 放回完整生命周期中理解，不孤立背函数名；
+3. 编译 `examples/`，先运行最小线程/连接数，再增加并发和异常输入；
+4. 阅读 07 章，对照 [`tcp-game-chat-redis`](https://github.com/feiyun0310/tcp-game-chat-redis) 查看设计如何进入实现；
+5. 阅读 08 章，用检查清单复盘资源所有权、退出流程和未覆盖风险；
+6. 对比 [`ab-fight-zookeeper`](https://github.com/feiyun0310/ab-fight-zookeeper)，继续理解服务拆分与发现。
+
+## 我建立的能力
+
+| 能力 | 具体体现 |
 | --- | --- |
-| 并发推理 | 用不变量分析共享数据，识别竞态、死锁和丢失唤醒 |
-| 网络协议意识 | 将 TCP 视为字节流，显式处理消息边界与异常连接 |
-| 事件驱动设计 | 理解 `select`/`epoll` 的适用场景和连接状态管理 |
-| 模块化设计 | 拆分网络、业务、存储职责，并定义模块间协议 |
-| 工程复盘 | 记录限制、验证方法和可以继续改进的方向 |
-
-## 推荐使用方式
-
-1. 按章节顺序阅读，先理解约束和不变量，再看代码。
-2. 在 Linux 环境中单独编译 `examples/` 下的案例，并使用多次运行、异常输入和并发压力观察行为。
-3. 将第 7 章与 [`tcp-game-chat-redis`](https://github.com/feiyun0310/tcp-game-chat-redis) 对照，查看知识如何落到完整项目。
-4. 将服务发现相关内容延伸到 [`ab-fight-zookeeper`](https://github.com/feiyun0310/ab-fight-zookeeper)，比较固定地址与注册中心两种架构。
-
-## 关键认识
-
-1. 锁保护的不是一行代码，而是一组必须同时成立的状态不变量。
-2. 条件变量必须与条件判断和互斥锁共同使用，并在循环中重新检查条件。
-3. TCP 只保证可靠字节流，不保留应用消息边界；协议必须自己解决长度、类型和关联关系。
-4. `epoll` 提升的是大量连接的事件管理效率，业务耗时仍应从事件循环中移出。
-5. 分层并不等于简单增加进程；每次拆分都需要明确数据所有权、失败语义和可观测性。
+| 程序建模 | 先定义实体、状态、不变量、所有权和生命周期 |
+| 并发推理 | 区分互斥与条件等待，设计有界队列和可结束线程 |
+| 网络协议意识 | 把 TCP 当作字节流，处理消息边界、部分收发和断线 |
+| 事件驱动设计 | 使用 select/epoll 管理就绪事件并隔离耗时任务 |
+| 服务分层 | 拆分客户端、逻辑与数据职责，定义 ACK 和失败语义 |
+| 工程复盘 | 明确当前验证程度、已知限制和下一步测试方法 |
 
 ## 局限与下一步
 
-- 为案例补充 Makefile/CMake、自动化测试和 GitHub Actions。
-- 使用 AddressSanitizer、ThreadSanitizer 与压力测试验证内存和并发安全。
-- 补充非阻塞发送、背压、连接重试、优雅退出和结构化日志。
-- 为完整项目加入性能指标，例如连接数、吞吐量、延迟分位数和 Redis 操作耗时。
+- 为全部案例补充统一 Makefile/CMake、自动化测试和 GitHub Actions；
+- 使用 AddressSanitizer、ThreadSanitizer、Valgrind 和压力测试做系统验证；
+- 继续完善非阻塞发送、背压、请求超时、断线重连和优雅退出；
+- 为完整项目记录连接数、吞吐量、延迟分位数、队列高水位和错误率；
+- 将每次项目实践都按“设计表—骨架—实现—验证—复盘”记录。
 
 ## 仓库说明
 
-本仓库是个人学习过程的结构化整理。内容以原始课程/练习材料为基础重新归纳，示例中的风险和未验证项会尽量明确标注；它展示的是学习方法、工程思考和持续改进过程，而不是生产级框架。
+本仓库是个人学习过程的结构化整理。内容以原始学习资料和练习为基础重新归纳，并补充了便于理解 API 使用顺序的流程图与工程注意事项。它展示的是学习方法、程序设计思路和持续改进过程，不代表生产级框架。
