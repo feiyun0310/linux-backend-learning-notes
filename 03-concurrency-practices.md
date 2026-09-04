@@ -1,394 +1,221 @@
-# 03 并发练习：银行账户与生产者消费者
+# 03 并发实践：银行账户与生产者—消费者
 
-## 银行账户练习
+这一章用两个练习把互斥锁、条件变量、有界队列和线程退出落到具体程序中。重点不是“能启动多个线程”，而是先写清数据结构、不变量、线程角色和等待条件。
 
-一个账户的 balance 是共享状态：
+## 一、多线程银行账户系统
 
-- 3 个存款线程，每个循环存款。
-- 2 个取款线程，每个循环取款。
-- 互斥锁保护余额的检查与修改。
-- 余额不足时，取款线程使用条件变量等待。
-- 存款完成后广播通知等待线程。
+### 1. 需求
 
-关键点是“检查余额”和“扣款”必须属于同一个临界区，否则两个取款线程可能同时认为余额足够。
+- 一个账户，初始余额 1000 元；
+- 3 个存款线程，每个循环 5 次，每次存入 100～500 元，间隔约 100 ms；
+- 2 个取款线程，每个循环 5 次，每次取出 50～200 元，间隔约 150 ms；
+- 余额不足时取款线程不能把余额扣成负数，而是等待存款发生后重新检查。
 
-正确的取款模型：
+### 2. 先定义数据和同步对象
 
-~~~text
-加锁
-while 余额不足:
-    等待条件变量（等待时自动释放锁）
-扣减余额
-解锁
-~~~
-
-原练习代码值得修正的细节：
-
-- 代码把 &deposit_ids[i] 传入线程，因此线程函数应使用 *(int*)arg 读取编号，不能直接把指针强转成整数。
-- 使用 time(NULL) 时应包含 time.h。
-- 随机数生成器本身也应考虑线程安全；工程代码可使用每线程随机引擎。
-
-## 生产者消费者模型
-
-生产者和消费者通过共享缓冲区解耦。它解决的不是“线程越多越快”，而是生产速度与消费速度不一致时的协调问题。
-
-有界阻塞队列包含：
-
-- 队列和容量上限。
-- 一把保护队列的互斥锁。
-- not_full：生产者等待队列非满。
-- not_empty：消费者等待队列非空。
-- TryPush(timeout) 和 TryPop(timeout)。
-
-~~~mermaid
-flowchart LR
-    P1[Producer A] --> Q[Bounded Blocking Queue]
-    P2[Producer B] --> Q
-    Q --> C1[Consumer X]
-    Q --> C2[Consumer Y]
-    Q --> C3[Consumer Z]
-    Q --> S[Statistics]
-~~~
-
-### 正确的等待关系
-
-- 生产者：队列满时等待 not_full；放入数据后通知 not_empty。
-- 消费者：队列空时等待 not_empty；取走数据后通知 not_full。
-
-原思维导图中“消费者等待 not_full”是笔误，消费者应等待 not_empty。
-
-## 停止语义
-
-只统计“生产者完成数量”可以完成练习，但通用阻塞队列更适合提供 Close：
-
-1. 生产者全部结束后关闭队列。
-2. Close 唤醒所有等待线程。
-3. 消费者继续取完剩余数据。
-4. 队列关闭且为空时，消费者退出。
-
-这样可以避免把“生产者数量”和“预计消息总数”硬编码进消费者。
-
-## 验收测试
-
-- 最终消费数量等于生产数量。
-- 队列大小始终在 0..capacity 范围。
-- 慢消费者不会导致无限占用内存。
-- 超时不会破坏队列状态。
-- 所有线程在停止后都能正常 join。
-- 使用小容量、高并发和随机延迟重复压力测试。
-
-
-
-## 完整可运行代码
-
-下面的代码根据 PDF 原稿整理，保留原练习场景，并修复了线程参数、随机数、头文件和停止语义等问题。独立源文件也保存在仓库的 `examples/` 目录。
-
-### 银行账户：pthread 互斥锁与条件变量
-
-~~~c
-#define _POSIX_C_SOURCE 200809L
-
-#include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-
-enum {
-    DEPOSIT_THREAD_COUNT = 3,
-    WITHDRAW_THREAD_COUNT = 2,
-    OPERATION_COUNT = 5
-};
+```c
+typedef struct {
+    int balance;
+    pthread_mutex_t mutex;
+    pthread_cond_t enough_money;
+} Account;
 
 typedef struct {
-    int id;
+    int thread_id;
+    Account *account;
     unsigned int seed;
-} WorkerArg;
+} WorkerArgs;
+```
 
-static int balance = 1000;
-static pthread_mutex_t balance_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t balance_changed = PTHREAD_COND_INITIALIZER;
+核心不变量：
 
-static int random_range(unsigned int *seed, int min, int max) {
-    return (int)(rand_r(seed) % (unsigned int)(max - min + 1)) + min;
+- `balance >= 0`；
+- 读取、判断和修改 `balance` 必须由同一把 `mutex` 保护；
+- “余额是否足够”必须在持锁时判断；
+- 每个线程使用独立随机种子，避免共享随机数状态产生额外竞争。
+
+### 3. 线程框架
+
+| 线程 | 数量 | 输入 | 修改的状态 | 阻塞点 |
+| --- | ---: | --- | --- | --- |
+| 存款线程 | 3 | Account、线程 ID | balance | mutex、sleep |
+| 取款线程 | 2 | Account、线程 ID | balance | mutex、cond、sleep |
+| 主线程 | 1 | 无 | 初始化/销毁 | join |
+
+### 4. 存款流程
+
+```mermaid
+flowchart TD
+    A[生成 100~500 的金额] --> B[锁住账户 mutex]
+    B --> C[balance += amount]
+    C --> D[记录余额变化]
+    D --> E[pthread_cond_broadcast 通知等待者]
+    E --> F[解锁]
+    F --> G[休眠约 100 ms]
+    G --> H{已完成 5 次?}
+    H -->|否| A
+    H -->|是| I[线程返回]
+```
+
+### 5. 取款流程
+
+```mermaid
+flowchart TD
+    A[生成 50~200 的金额] --> B[锁住账户 mutex]
+    B --> C{balance >= amount?}
+    C -->|否| D[pthread_cond_wait]
+    D --> C
+    C -->|是| E[balance -= amount]
+    E --> F[记录余额变化]
+    F --> G[解锁]
+    G --> H[休眠约 150 ms]
+    H --> I{已完成 5 次?}
+    I -->|否| A
+    I -->|是| J[线程返回]
+```
+
+对应代码模式：
+
+```c
+pthread_mutex_lock(&account->mutex);
+while (account->balance < amount) {
+    pthread_cond_wait(&account->enough_money, &account->mutex);
 }
+account->balance -= amount;
+pthread_mutex_unlock(&account->mutex);
+```
 
-static void sleep_ms(long milliseconds) {
-    struct timespec duration = {
-        .tv_sec = milliseconds / 1000,
-        .tv_nsec = (milliseconds % 1000) * 1000000L,
-    };
-    nanosleep(&duration, NULL);
-}
+不能用 `if` 代替 `while`。多个取款线程同时被唤醒时，先取得锁的线程可能已经取走一部分余额，后取得锁的线程必须重新检查。存款应在修改余额后 `signal` 或 `broadcast`。
 
-static void *deposit_thread(void *arg) {
-    WorkerArg *worker = arg;
+### 6. 主函数顺序
 
-    for (int i = 0; i < OPERATION_COUNT; ++i) {
-        int amount = random_range(&worker->seed, 100, 500);
+1. 初始化账户余额、互斥锁和条件变量；
+2. 准备每个线程独立的参数；
+3. 创建 3 个存款线程和 2 个取款线程，并检查每次创建结果；
+4. join 所有成功创建的线程；
+5. 输出最终余额并验证不变量；
+6. 销毁条件变量和互斥锁。
 
-        pthread_mutex_lock(&balance_mutex);
-        printf("[存款 %d] 准备存入 %d 元\n", worker->id, amount);
-        balance += amount;
-        printf("[存款 %d] 完成，余额 %d 元\n", worker->id, balance);
-        pthread_cond_broadcast(&balance_changed);
-        pthread_mutex_unlock(&balance_mutex);
+完整案例见 [`examples/bank_account.c`](examples/bank_account.c)。
 
-        sleep_ms(100);
-    }
+## 二、生产者—消费者模型
 
-    printf("[存款 %d] 完成全部操作\n", worker->id);
-    return NULL;
-}
+### 1. 什么时候使用
 
-static void *withdraw_thread(void *arg) {
-    WorkerArg *worker = arg;
+当“产生数据”和“处理数据”的速度不同，或希望两者互不阻塞时，可以在中间放一个有界缓冲区。生产者只负责生成任务，消费者只负责处理任务，队列负责解耦。日志、网络收包、磁盘写入和线程池都能使用这一模型。
 
-    for (int i = 0; i < OPERATION_COUNT; ++i) {
-        int amount = random_range(&worker->seed, 50, 200);
+本练习设定：2 个生产者各产生 50 个数据；3 个消费者以不同速度处理；共享容量 20 的阻塞队列；统计线程每秒输出进度；Push/Pop 支持超时。
 
-        pthread_mutex_lock(&balance_mutex);
-        printf("[取款 %d] 准备取出 %d 元\n", worker->id, amount);
+### 2. 阻塞队列数据结构
 
-        while (balance < amount) {
-            printf("[取款 %d] 余额不足（%d < %d），等待存款\n",
-                   worker->id, balance, amount);
-            pthread_cond_wait(&balance_changed, &balance_mutex);
-        }
-
-        balance -= amount;
-        printf("[取款 %d] 完成，余额 %d 元\n", worker->id, balance);
-        pthread_mutex_unlock(&balance_mutex);
-
-        sleep_ms(150);
-    }
-
-    printf("[取款 %d] 完成全部操作\n", worker->id);
-    return NULL;
-}
-
-int main(void) {
-    pthread_t deposit_threads[DEPOSIT_THREAD_COUNT];
-    pthread_t withdraw_threads[WITHDRAW_THREAD_COUNT];
-    WorkerArg deposit_args[DEPOSIT_THREAD_COUNT];
-    WorkerArg withdraw_args[WITHDRAW_THREAD_COUNT];
-    unsigned int base_seed = (unsigned int)time(NULL);
-
-    printf("=== 银行账户系统启动 ===\n");
-    printf("初始余额：%d 元\n\n", balance);
-
-    for (int i = 0; i < DEPOSIT_THREAD_COUNT; ++i) {
-        deposit_args[i] = (WorkerArg){
-            .id = i + 1,
-            .seed = base_seed ^ (unsigned int)(0x9e3779b9U * (i + 1)),
-        };
-        pthread_create(&deposit_threads[i], NULL, deposit_thread,
-                       &deposit_args[i]);
-    }
-
-    for (int i = 0; i < WITHDRAW_THREAD_COUNT; ++i) {
-        withdraw_args[i] = (WorkerArg){
-            .id = i + 1,
-            .seed = base_seed ^ (unsigned int)(0x85ebca6bU * (i + 1)),
-        };
-        pthread_create(&withdraw_threads[i], NULL, withdraw_thread,
-                       &withdraw_args[i]);
-    }
-
-    for (int i = 0; i < DEPOSIT_THREAD_COUNT; ++i) {
-        pthread_join(deposit_threads[i], NULL);
-    }
-    for (int i = 0; i < WITHDRAW_THREAD_COUNT; ++i) {
-        pthread_join(withdraw_threads[i], NULL);
-    }
-
-    printf("\n=== 所有线程执行完毕 ===\n");
-    printf("最终余额：%d 元\n", balance);
-
-    pthread_cond_destroy(&balance_changed);
-    pthread_mutex_destroy(&balance_mutex);
-    return EXIT_SUCCESS;
-}
-~~~
-
-编译与运行：
-
-~~~bash
-gcc -std=c11 -O2 -Wall -Wextra -Wpedantic -pthread \
-  examples/bank_account.c -o bank_account
-./bank_account
-~~~
-
-这个示例必须用 `while (balance < amount)` 重新检查条件，因为条件变量可能出现虚假唤醒，或者其他取款线程先一步改变余额。
-
-### 生产者消费者：有界阻塞队列
-
-~~~cpp
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
-#include <cstddef>
-#include <iostream>
-#include <mutex>
-#include <queue>
-#include <random>
-#include <thread>
-
+```cpp
 class BlockingQueue {
 public:
-    explicit BlockingQueue(std::size_t capacity) : capacity_(capacity) {}
-
-    bool TryPush(int value, std::chrono::milliseconds timeout) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        bool ready = not_full_.wait_for(lock, timeout, [this] {
-            return closed_ || queue_.size() < capacity_;
-        });
-
-        if (!ready || closed_) {
-            return false;
-        }
-
-        queue_.push(value);
-        not_empty_.notify_one();
-        return true;
-    }
-
-    bool TryPop(int &value, std::chrono::milliseconds timeout) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        bool ready = not_empty_.wait_for(lock, timeout, [this] {
-            return closed_ || !queue_.empty();
-        });
-
-        if (!ready || queue_.empty()) {
-            return false;
-        }
-
-        value = queue_.front();
-        queue_.pop();
-        not_full_.notify_one();
-        return true;
-    }
-
-    void Close() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        closed_ = true;
-        not_full_.notify_all();
-        not_empty_.notify_all();
-    }
-
-    std::size_t Size() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return queue_.size();
-    }
-
-    bool ClosedAndEmpty() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return closed_ && queue_.empty();
-    }
-
+    explicit BlockingQueue(std::size_t capacity);
+    bool TryPush(int value, int timeout_ms);
+    bool TryPop(int& value, int timeout_ms);
+    void Close();
 private:
     std::queue<int> queue_;
-    const std::size_t capacity_;
-    mutable std::mutex mutex_;
-    std::condition_variable not_full_;
-    std::condition_variable not_empty_;
+    std::size_t capacity_;
     bool closed_ = false;
+    std::mutex mutex_;
+    std::condition_variable not_empty_;
+    std::condition_variable not_full_;
 };
+```
 
-std::atomic<int> total_produced{0};
-std::atomic<int> total_consumed{0};
-std::mutex output_mutex;
+队列不变量是 `0 <= queue_.size() <= capacity_`。`queue_`、`closed_` 和完成条件都必须在 `mutex_` 的同步域内访问。
 
-void Producer(BlockingQueue &queue, char id, int min_value, int max_value,
-              int min_delay_ms, int max_delay_ms) {
-    std::random_device device;
-    std::mt19937 generator(device());
-    std::uniform_int_distribution<int> value_distribution(min_value, max_value);
-    std::uniform_int_distribution<int> delay_distribution(min_delay_ms,
-                                                           max_delay_ms);
+### 3. 两个条件变量
 
-    for (int i = 0; i < 50; ++i) {
-        int value = value_distribution(generator);
-        while (!queue.TryPush(value, std::chrono::milliseconds(500))) {
-        }
-        ++total_produced;
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(delay_distribution(generator)));
-    }
+- `not_full_`：队列还有空位。队列满时生产者等待，消费者 Pop 后通知；
+- `not_empty_`：队列中有数据。队列空时消费者等待，生产者 Push 后通知。
 
-    std::lock_guard<std::mutex> lock(output_mutex);
-    std::cout << "[Producer " << id << "] done\n";
-}
+条件变量的名称描述“等待者想要的条件”，而不是谁发送通知。
 
-void Consumer(BlockingQueue &queue, char id, int delay_ms) {
-    while (true) {
-        int value = 0;
-        if (queue.TryPop(value, std::chrono::milliseconds(100))) {
-            ++total_consumed;
-            std::lock_guard<std::mutex> lock(output_mutex);
-            std::cout << "[Consumer " << id << "] consumed " << value
-                      << ", buffer: " << queue.Size() << '\n';
-        } else if (queue.ClosedAndEmpty()) {
-            break;
-        }
+### 4. `TryPush` 流程
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-    }
+```mermaid
+flowchart TD
+    A[生产数据] --> B[锁住 queue mutex]
+    B --> C[wait_for: 队列未满或已关闭]
+    C -->|超时| D[返回 false / 统计超时]
+    C -->|队列关闭| E[返回 false]
+    C -->|可写| F[queue.push]
+    F --> G[更新生产计数并解锁]
+    G --> H[not_empty.notify_one]
+    H --> I[返回 true]
+```
 
-    std::lock_guard<std::mutex> lock(output_mutex);
-    std::cout << "[Consumer " << id << "] done\n";
-}
+```cpp
+std::unique_lock<std::mutex> lock(mutex_);
+bool ready = not_full_.wait_for(
+    lock, std::chrono::milliseconds(timeout_ms),
+    [&] { return queue_.size() < capacity_ || closed_; });
+if (!ready || closed_) return false;
+queue_.push(value);
+lock.unlock();
+not_empty_.notify_one();
+return true;
+```
 
-void Statistics(BlockingQueue &queue) {
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+### 5. `TryPop` 流程
 
-        int produced = total_produced.load();
-        int consumed = total_consumed.load();
-        std::size_t size = queue.Size();
-        {
-            std::lock_guard<std::mutex> lock(output_mutex);
-            std::cout << "[Stats] produced=" << produced
-                      << ", consumed=" << consumed
-                      << ", buffer=" << size << '\n';
-        }
+```mermaid
+flowchart TD
+    A[锁住 queue mutex] --> B[wait_for: 队列非空或已关闭]
+    B -->|超时| C[返回 false]
+    B -->|关闭且为空| D[消费者结束]
+    B -->|有数据| E[读取 front 并 pop]
+    E --> F[更新消费计数并解锁]
+    F --> G[not_full.notify_one]
+    G --> H[在锁外处理数据]
+```
 
-        if (queue.ClosedAndEmpty() && consumed == produced) {
-            break;
-        }
-    }
-}
+消费者结束条件不能只是“当前队列为空”，因为生产者之后可能继续放数据。完整条件是：生产已结束并且队列为空，或者队列已 `Close()` 且为空。
 
-int main() {
-    BlockingQueue queue(20);
+### 6. 关闭流程
 
-    std::thread producer_a(Producer, std::ref(queue), 'A', 1, 100, 100, 300);
-    std::thread producer_b(Producer, std::ref(queue), 'B', 101, 200, 50, 150);
-    std::thread consumer_x(Consumer, std::ref(queue), 'X', 200);
-    std::thread consumer_y(Consumer, std::ref(queue), 'Y', 100);
-    std::thread consumer_z(Consumer, std::ref(queue), 'Z', 300);
-    std::thread statistics(Statistics, std::ref(queue));
+```mermaid
+sequenceDiagram
+    participant M as Main
+    participant P as Producers
+    participant Q as BlockingQueue
+    participant C as Consumers
+    M->>P: 创建并运行
+    P->>Q: TryPush
+    C->>Q: TryPop
+    M->>P: join 所有生产者
+    M->>Q: Close + notify_all
+    Q-->>C: 队列耗尽后返回 false
+    M->>C: join 所有消费者
+```
 
-    producer_a.join();
-    producer_b.join();
-    queue.Close();
+`Close()` 应在持锁时设置 `closed_ = true`，随后对 `not_empty_` 和 `not_full_` 执行 `notify_all()`，否则仍可能有线程永久等待。
 
-    consumer_x.join();
-    consumer_y.join();
-    consumer_z.join();
-    statistics.join();
+### 7. 统计线程
 
-    std::cout << "All done: produced=" << total_produced.load()
-              << ", consumed=" << total_consumed.load() << '\n';
-    return 0;
-}
-~~~
+统计线程每秒读取生产总数、消费总数和队列长度。共享计数使用原子变量或锁。统计线程也必须有停止条件，不能留下永不退出的 `while (true)`。
 
-编译与运行：
+完整案例见 [`examples/producer_consumer.cpp`](examples/producer_consumer.cpp)。
 
-~~~bash
-g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -pthread \
-  examples/producer_consumer.cpp -o producer_consumer
-./producer_consumer
-~~~
+## 三、对照总结
 
-该版本仍保留 PDF 中的超时等待、两个生产者、三个消费者和统计线程；同时加入 `Close()`，避免消费者依赖固定的生产者数量和消息总数才能退出。
+| 问题 | 银行账户 | 生产者—消费者 |
+| --- | --- | --- |
+| 共享状态 | balance | queue、closed、计数 |
+| 互斥锁保护 | 判断 + 修改余额 | 检查 + Push/Pop |
+| 等待条件 | 余额足够 | 非空 / 非满 |
+| 唤醒者 | 存款线程 | Push 唤醒消费者，Pop 唤醒生产者 |
+| 退出难点 | 固定次数操作完成 | 生产结束且队列耗尽 |
+
+## 常见错误
+
+- 在锁外检查条件，进入锁后状态已经变化；
+- 用 `if` 等待条件变量，没有处理虚假唤醒；
+- 通知了错误的条件变量；
+- 队列暂时为空就结束消费者；
+- 生产者结束后没有 `notify_all`；
+- 统计线程读取普通计数时没有同步；
+- 持锁执行耗时的消费逻辑，导致生产者无法进入队列。
